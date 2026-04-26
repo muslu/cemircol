@@ -1,10 +1,9 @@
 # cemircol
 
-Yüksek performanslı, sütun tabanlı (columnar) veri depolama kütüphanesi. Rust ile yazılan C-ABI (PyO3) tabanlı çekirdeği sayesinde zero-copy mmap işlemleri kullanarak muazzam okuma performansı sunar. Ayrıca `flate2` (Zlib) üzerinden blok sıkıştırması yaparak verilerinizi **Parquet'ten bile daha az alanda** depolar.
+Yüksek performanslı, sütun tabanlı (columnar) veri depolama kütüphanesi. Rust/PyO3 çekirdeği, `zstd` maksimum sıkıştırması ve sıfır-kopya `mmap + numpy` pipeline'ı sayesinde **Parquet'ten daha hızlı okuma** ve **15x daha küçük dosya boyutu** sunar.
 
 ## Kurulum
 
-Sadece okuma ve yazma özelliklerini kullanmak için (hafif kurulum):
 ```bash
 pip install cemircol
 ```
@@ -18,12 +17,14 @@ pip install "cemircol[froms]"
 
 ## Özellikler
 
+- **zstd Level 22 Sıkıştırma:** Her sütunu bağımsız olarak maksimum düzeyde sıkıştırır — Parquet'ten 15x daha küçük dosya boyutu.
+- **Sıfır-Kopya Okuma Pipeline:** `mmap → PyByteArray (doğrudan decompress) → numpy.frombuffer` zinciri ile hiçbir ara Rust buffer oluşturulmaz.
+- **Paralel Yazma:** `rayon` ile tüm sütunlar aynı anda sıkıştırılır, tüm CPU core'ları kullanılır.
+- **numpy Entegrasyonu:** `query()` doğrudan numpy array döner — Python list nesnesi yaratma yükü yoktur.
 - **Mmap (Memory Mapped Files):** Dosyaları belleğe eşleyerek RAM tüketimini minimize eder.
-- **Zlib Sıkıştırma:** Her sütunu bağımsız olarak maksimum seviyede (Level 9) sıkıştırır. Mükemmel "footprint" (ayak izi) sağlar.
-- **Rust Core & PyO3 API:** Veri işleme mantığı tamamen güvenli ve performanslı Rust dilinde yazılmıştır, Python'da hiçbir bağımlılık gerektirmez.
-- **Doğrudan Çeviri (Converter):** CSV ve Parquet dosyalarından anında CemirCol formatına dönüşüm.
+- **Geriye Dönük Uyumluluk:** Eski zlib formatındaki `.cemir` dosyalar otomatik tanınır ve okunur.
 
-## Kullanım & Örnekler
+## Kullanım
 
 ### Hızlı Başlangıç
 
@@ -34,94 +35,84 @@ from cemircol import CemircolWriter, CemircolReader
 data = {"id": [1, 2, 3], "val": [1.1, 2.2, 3.3]}
 CemircolWriter.write("data.cemir", data)
 
-# Veri okuma
+# Veri okuma — numpy array döner
 reader = CemircolReader("data.cemir")
-print(reader.columns())       # ['id', 'val']
-print(reader.num_rows())      # 3
-print(reader.query("val"))    # [1.1, 2.2, 3.3]
+print(reader.columns())    # ['id', 'val']
+print(reader.num_rows())   # 3
+print(reader.query("val")) # array([1.1, 2.2, 3.3])
 ```
 
-### CSV ve Parquet Formatından Çevirme (Converter)
-
-Bu özellikleri kullanmak için paketi `cemircol[froms]` seçeneği ile kurmuş olmanız gerekir:
+### CSV ve Parquet'ten Çevirme
 
 ```python
 from cemircol import from_csv, from_parquet
 
-# CSV'den çevirme
 from_csv("sales_data.csv", "sales_data.cemir")
-
-# Parquet'ten çevirme
 from_parquet("analytics.parquet", "analytics.cemir")
 ```
 
-## Performans Karşılaştırma Testi (Benchmark)
+## Performans Karşılaştırması
 
-Depoda bulunan `benchmark.py` dosyası ile 1 Milyon satırlık rastgele bir veri seti üzerinde yapılan test sonuçları:
+10.000.000 satır, 2 sütun (`int64` + `float64`) benchmark (`benchmark.py`):
 
-### Dosya Boyutları (Disk Tüketimi)
-```text
---- File Sizes ---
-  CemirCol  : 2.87 MB   🥇 (En küçük dosya boyutu)
-  Parquet   : 14.65 MB
-  CSV       : 16.35 MB
-  JSON      : 17.31 MB
+### Dosya Boyutları
+
+```
+  CemirCol  :   5.52 MB   ← 15x Parquet'ten küçük
+  Parquet   :  85.09 MB
+  CSV       : 182.61 MB
+  JSON      : 192.15 MB
 ```
 
-### Okuma Süreleri (Tek Bir Sütun)
-```text
---- Read Times (column: 'value') ---
-  CemirCol  : 0.08362 s  🥇 (En hızlı okuma - Mmap)
-  Parquet   : 0.28100 s
-  JSON      : 0.56046 s
-  CSV       : 3.00141 s
+### Tek Sütun Okuma Süresi
+
 ```
-> Parquet ve CemirCol sütun tabanlı mimaridedir ancak Cemircol okuma anında zero-copy yaklaşımı kullandığından anlık tepki süresi (latency) çok daha iyidir.
+  CemirCol  : 0.108 s   ← Parquet'ten hızlı
+  Parquet   : 0.113 s
+  JSON      : 1.219 s
+  CSV       : 6.597 s
+```
 
-## Proje Güncelleme ve PyPI Üzerinde Yayınlama
+> `query()` numpy array döndürdüğünden veri direkt bilimsel hesaplama için hazırdır.
 
-Projeyi güncelleyeceğiniz zaman veya yeni bir sürüm yayınlamak istediğinizde aşağıdaki adımları sırasıyla izlemelisiniz:
+## Teknik Mimari
 
-### 1. Güncelleme Adımları ve Sebepleri
+### Dosya Formatı (`.cemir`)
 
-- **Adım 1: `Cargo.toml` Dosyasını Güncellemek**
-  - **Ne Yapılır:** `version = "x.y.z"` satırındaki sürüm numarası artırılır (Örn: `0.1.1` -> `0.1.2`).
-  - **Sebep:** Projenin çekirdeği (hız ve bellek yönetimi sağlayan kısımlar) Rust ile yazılmıştır. Rust derleyicisi olan Cargo'nun yeni derleme yaparken doğru sürüm bilgisini üretmesi ve Rust paket bağımlılıklarının doğru çalışması için bu gereklidir.
-- **Adım 2: `pyproject.toml` Dosyasını Güncellemek**
-  - **Ne Yapılır:** `[project]` altındaki `version = "x.y.z"` satırındaki sürüm numarası artırılır.
-  - **Sebep:** Projenin son kullanıcı tarafı Python'dur ve PyPI (Python Package Index) üzerinde yayınlanırken paket bilgileri büyük oranda bu dosyadan okunur. `Cargo.toml` ve `pyproject.toml` sürümlerinin senkronize (aynı) olması paket yönetiminde karışıklıkları önler.
-- **Adım 3: Eski Derleme Dosyalarını Temizlemek**
-  - **Ne Yapılır:** `target/wheels/` klasörünün içi boşaltılır (Projedeki `./publish.sh` betiği bunu otomatik yapar).
-  - **Sebep:** Twine aracı o klasördeki her şeyi yüklemeye çalışır. Eğer eski derlemeler (örneğin eski `0.1.0` dosyası) orada kalırsa, PyPI "File already exists" hatası vererek yüklemeyi durduracaktır.
-- **Adım 4: Derleme ve Yükleme (Maturin & Twine)**
-  - **Ne Yapılır:** `maturin build --release` ile proje derlenir ve `twine upload target/wheels/*` ile PyPI sunucularına aktarılır.
+```
+┌──────────┬──────────────┬──────────────┬───────────────────────┬──────────────┬──────────┐
+│ "CEM1"   │ col_1_data   │ col_2_data   │ metadata_json         │ meta_len u64 │ "CEM1"   │
+│ 4 bytes  │ (zstd)       │ (zstd)       │ (FileMeta: offsets,   │ 8 bytes      │ 4 bytes  │
+│          │              │              │  types, compression)  │              │          │
+└──────────┴──────────────┴──────────────┴───────────────────────┴──────────────┴──────────┘
+```
 
-### 2. Neden Maturin Kullanıldı?
+### Okuma Pipeline
 
-Projenin temel gücü Rust dilinde yazılmış olmasından gelir. Ancak son kullanıcının (veri bilimci vs.) bu gücü bilindik ve basit bir Python arayüzünden (`import cemircol`) kullanabilmesi gerekir. 
+```
+mmap (sıfır kopya)
+  └─► sıkıştırılmış dilim (compressed slice)
+        └─► PyByteArray::new_with → zstd::stream::copy_decode (doğrudan Python belleğine)
+              └─► numpy.frombuffer (sıfır-kopya view)
+                    └─► numpy array → Python
+```
 
-- **Maturin**, Rust dilinde yazılmış kodları (PyO3 kütüphanesi yardımıyla) otomatik olarak Python'un anlayabileceği "Extension Module" (C-Eklentisi) formatına çevirir.
-- Geleneksel yöntemlerle Python için bir C/C++ uzantısı yazmak ve derlemek oldukça zor, hataya açık ve platform bağımlı bir süreçtir.
-- Maturin, hiçbir karmaşık `setup.py` dosyasına ihtiyaç duymadan, Rust tabanlı bir projeyi saniyeler içinde direkt olarak bir Python Wheel (`.whl`) dosyasına (dağıtılabilir paket formatına) dönüştürür.
+## Proje Yayınlama
 
-### 3. Maturin Olmadan Olmaz mı?
+Sürüm yayınlamadan önce `Cargo.toml` ve `pyproject.toml` içindeki versiyon numaralarını senkronize güncelle, ardından:
 
-Evet, teorik olarak **olabilir ancak oldukça meşakkatli olur**. 
+```bash
+./publish.sh
+# Twine kullanıcı adı : __token__
+# Twine şifre        : pypi-... (PyPI API token)
+```
 
-Eğer Maturin kullanmak istemezsek:
-1. Geleneksel `setuptools-rust` kütüphanesini kurmamız gerekir.
-2. Karmaşık bir `setup.py` dosyası yazarak, Python'un `build` sistemi ile Rust'ın `cargo` derleyicisini manuel olarak haberleştirmemiz ve yönetmemiz gerekir.
-3. Linux, Windows ve macOS için teker teker doğru tekerlek (wheel) etiketlemelerini (`manylinux`, `musllinux` vb.) C düzeyindeki derleme aşamalarında manuel olarak yapılandırmamız gerekir.
+Geliştirme ortamı için:
+```bash
+maturin develop --release
+```
 
-Maturin tüm bu süreçleri bir standart haline getirdiği ve sıfır konfigürasyon ile modern `pyproject.toml` standartını desteklediği için modern Rust-Python projelerinde de-facto (standart) araçtır.
-
-### Yayınlama Komutları
-
-Maturin için eski `publish` komutu kullanımdan (deprecated) kaldırılmıştır ve PyPI standart şifre yerine API Token metoduna geçmiştir. Yayınlamak için depoda bulunan `./publish.sh` betiğini çalıştırabilirsiniz. Bu betik eski derlemeleri temizler, yenisini derler ve `twine` ile gönderir.
-
-Terminalde `twine` sizden istendiğinde:
-- **Kullanıcı adı**: `__token__` girin.
-- **Şifre**: PyPI hesap ayarları > API tokens kısmından oluşturduğunuz `pypi-` ile başlayan tam yetkili token verisini girin.
+---
 
 - Muslu YÜKSEKTEPE
 - Cem Emir YÜKSEKTEPE

@@ -1,12 +1,10 @@
-// src/writer.rs
-use flate2::write::ZlibEncoder;
-use flate2::Compression;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{Seek, Write};
+use std::io::{BufWriter, Write};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ColumnMeta {
@@ -16,10 +14,16 @@ pub struct ColumnMeta {
     pub data_type: String,
 }
 
+fn default_compression() -> String {
+    "zlib".to_string()
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct FileMeta {
     pub num_rows: u64,
     pub columns: HashMap<String, ColumnMeta>,
+    #[serde(default = "default_compression")]
+    pub compression: String,
 }
 
 #[pyclass]
@@ -33,47 +37,43 @@ impl CemircolWriter {
             return Ok(());
         }
 
-        let mut file = File::create(filename)
-            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+        let mut num_rows: u64 = 0;
 
-        // Write opening magic bytes
-        file.write_all(b"CEM1")
-            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
-
-        let mut meta = FileMeta {
-            num_rows: 0,
-            columns: HashMap::new(),
-        };
-
-        let mut first = true;
+        // GIL tutarak tüm sütun verilerini çek
+        let mut raw_columns: Vec<(String, Vec<u8>, &'static str)> =
+            Vec::with_capacity(data.len());
 
         for (key, value) in data.iter() {
             let col_name: String = key.extract()?;
 
-            // Try int64 first, then float64
             let (raw_bytes, dtype) = if let Ok(values) = value.extract::<Vec<i64>>() {
-                if first {
-                    meta.num_rows = values.len() as u64;
-                    first = false;
-                } else if values.len() as u64 != meta.num_rows {
+                let n = values.len();
+                if num_rows == 0 {
+                    num_rows = n as u64;
+                } else if n as u64 != num_rows {
                     return Err(pyo3::exceptions::PyValueError::new_err(format!(
                         "Column '{}' length mismatch",
                         col_name
                     )));
                 }
-                let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+                // Sıfır kopya: Vec<i64> → &[u8] (x86 little-endian)
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(values.as_ptr() as *const u8, n * 8).to_vec()
+                };
                 (bytes, "int64")
             } else if let Ok(values) = value.extract::<Vec<f64>>() {
-                if first {
-                    meta.num_rows = values.len() as u64;
-                    first = false;
-                } else if values.len() as u64 != meta.num_rows {
+                let n = values.len();
+                if num_rows == 0 {
+                    num_rows = n as u64;
+                } else if n as u64 != num_rows {
                     return Err(pyo3::exceptions::PyValueError::new_err(format!(
                         "Column '{}' length mismatch",
                         col_name
                     )));
                 }
-                let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(values.as_ptr() as *const u8, n * 8).to_vec()
+                };
                 (bytes, "float64")
             } else {
                 return Err(pyo3::exceptions::PyTypeError::new_err(format!(
@@ -82,45 +82,67 @@ impl CemircolWriter {
                 )));
             };
 
-            // Compress with zlib level 9
-            let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
-            encoder
-                .write_all(&raw_bytes)
-                .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
-            let compressed = encoder
-                .finish()
-                .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+            raw_columns.push((col_name, raw_bytes, dtype));
+        }
 
-            let offset = file
-                .stream_position()
-                .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+        // Tüm sütunları rayon ile paralel sıkıştır (zstd level 22 = max sıkıştırma)
+        // Rayon thread'leri Python nesnesine dokunmaz, GIL gerekmez
+        let compressed_columns: Vec<(String, Vec<u8>, &str, u64)> = raw_columns
+            .into_par_iter()
+            .map(|(name, raw_bytes, dtype)| {
+                let uncompressed_len = raw_bytes.len() as u64;
+                let compressed =
+                    zstd::encode_all(&raw_bytes[..], 22).expect("zstd compression failed");
+                (name, compressed, dtype, uncompressed_len)
+            })
+            .collect();
 
-            file.write_all(&compressed)
-                .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+        // Dosyaya yaz
+        let file = File::create(filename)
+            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+        let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, file);
 
+        writer
+            .write_all(b"CEM1")
+            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+
+        // Offset hesapla (magic 4 byte'tan sonra)
+        let mut offset: u64 = 4;
+        let mut meta = FileMeta {
+            num_rows,
+            columns: HashMap::with_capacity(compressed_columns.len()),
+            compression: "zstd".to_string(),
+        };
+
+        for (name, compressed, dtype, uncompressed_len) in &compressed_columns {
             meta.columns.insert(
-                col_name,
+                name.clone(),
                 ColumnMeta {
                     offset,
                     compressed_length: compressed.len() as u64,
-                    uncompressed_length: raw_bytes.len() as u64,
+                    uncompressed_length: *uncompressed_len,
                     data_type: dtype.to_string(),
                 },
             );
+            offset += compressed.len() as u64;
         }
 
-        // Write metadata footer
+        for (_, compressed, _, _) in &compressed_columns {
+            writer
+                .write_all(compressed)
+                .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+        }
+
         let meta_json = serde_json::to_vec(&meta)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-        file.write_all(&meta_json)
+        writer
+            .write_all(&meta_json)
             .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
-
-        // Write metadata length (u64 LE)
-        file.write_all(&(meta_json.len() as u64).to_le_bytes())
+        writer
+            .write_all(&(meta_json.len() as u64).to_le_bytes())
             .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
-
-        // Write closing magic bytes
-        file.write_all(b"CEM1")
+        writer
+            .write_all(b"CEM1")
             .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
 
         Ok(())
