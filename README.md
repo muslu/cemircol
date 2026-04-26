@@ -4,11 +4,17 @@ Yüksek performanslı, sütun tabanlı (columnar) veri depolama kütüphanesi. R
 
 ## Kurulum
 
+Sadece okuma ve yazma özelliklerini kullanmak için (hafif kurulum):
 ```bash
 pip install cemircol
 ```
 
-*(Kaynak koddan derlemek için Rust toolchain gereklidir: `bash src/setup.sh` veya `maturin develop --release`)*
+CSV ve Parquet dönüştürücülerini kullanmak için:
+```bash
+pip install "cemircol[froms]"
+```
+
+*(Kaynak koddan derlemek için Rust toolchain gereklidir: `maturin develop --release`)*
 
 ## Özellikler
 
@@ -37,7 +43,7 @@ print(reader.query("val"))    # [1.1, 2.2, 3.3]
 
 ### CSV ve Parquet Formatından Çevirme (Converter)
 
-Pandas kuruluysa ( `pip install pandas pyarrow` ) mevcut verilerinizi çok kolay bir şekilde CemirCol'a dönüştürebilirsiniz:
+Bu özellikleri kullanmak için paketi `cemircol[froms]` seçeneği ile kurmuş olmanız gerekir:
 
 ```python
 from cemircol import from_csv, from_parquet
