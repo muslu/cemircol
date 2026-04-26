@@ -11,6 +11,9 @@ if ! command -v maturin &> /dev/null || ! command -v twine &> /dev/null; then
     exit 1
 fi
 
+echo "[*] Eski derlemeler temizleniyor..."
+rm -rf target/wheels/
+
 echo "[*] Derleme işlemi başlıyor..."
 maturin build --release
 
