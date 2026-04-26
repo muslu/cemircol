@@ -8,7 +8,7 @@ import csv
 import pandas as pd
 from cemircol import CemircolWriter, CemircolReader
 
-ROWS = 1_000_000
+ROWS = 10_000_000
 
 def generate_data(rows: int) -> dict:
     return {
@@ -85,9 +85,9 @@ def benchmark():
     print(f"  {'JSON':10s}: {t_json:.5f} s")
 
     # Cleanup
-    # for p in [cemir_path, csv_path, json_path, parquet_path]:
-    #     if os.path.exists(p):
-    #         os.remove(p)
+    for p in [cemir_path, csv_path, json_path, parquet_path]:
+        if os.path.exists(p):
+            os.remove(p)
 
 if __name__ == "__main__":
     benchmark()
