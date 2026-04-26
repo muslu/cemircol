@@ -1,0 +1,23 @@
+# pyproject.toml
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "cemircol"
+version = "0.1.0"
+description = "High-performance columnar storage with zlib compression. Parquet alternative."
+readme = "README.md"
+requires-python = ">=3.8"
+authors = [
+    { name = "Muslu Yüksektepe", email = "musluyuksektepe@gmail.com" },
+    { name = "Cem Emir Yüksektepe", email = "cememir2017@gmail.com" }
+]
+license = { text = "MIT" }
+
+[project.urls]
+Repository = "https://github.com/muslu/cemircol.git"
+
+[tool.maturin]
+bindings = "pyo3"
+module-name = "cemircol._cemircol"
