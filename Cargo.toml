@@ -1,6 +1,6 @@
 [package]
 name = "cemircol"
-version = "2026.04.26.1"
+version = "1.0.1"
 edition = "2021"
 description = "High-performance columnar storage with zlib compression. Parquet alternative."
 license = "MIT"
